@@ -12,9 +12,8 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/syscall.h>
-//#include <sys/sendfile.h>
+#include <sys/sendfile.h>
 
-// #define MAX_CONN 20000
 #define MAX_EVENTS 10240
 #define PORT "8888"
 
@@ -97,7 +96,7 @@ int main(int argc, char* argv[]) {
     return -1;
   }
 
-  epoll_fd = syscall(__NR_epoll_create1, 0);//epoll_create1(0);
+  epoll_fd = epoll_create1(0);
   if (epoll_fd == -1) {
     perror("epoll_create");
     return -1;
@@ -105,7 +104,7 @@ int main(int argc, char* argv[]) {
 
   event.data.fd = listen_fd;
   event.events = EPOLLIN | EPOLLET;
-  ret = syscall(__NR_epoll_ctl, epoll_fd, EPOLL_CTL_ADD, listen_fd, &event);//epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listen_fd, &event);
+  ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listen_fd, &event);
   if (ret == -1) {
     perror("epoll_ctl");
     return -1;
@@ -116,7 +115,7 @@ int main(int argc, char* argv[]) {
   for (;;) {
     int n, i;
 
-    n = syscall(__NR_epoll_wait, events, MAX_EVENTS, -1);//epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
+    n = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
     for (i = 0; i < n; i++) {
       if (events[i].events & EPOLLERR || events[i].events & EPOLLHUP || !events[i].events & EPOLLIN) {
         fprintf(stderr, "epoll error\n");
@@ -152,7 +151,7 @@ int main(int argc, char* argv[]) {
 
           event.data.fd = in_fd;
           event.events = EPOLLIN | EPOLLET;
-          ret = syscall(__NR_epoll_ctl, EPOLL_CTL_ADD, in_fd, &event);//epoll_ctl(epoll_fd, EPOLL_CTL_ADD, in_fd, &event);
+          ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, in_fd, &event);
           if (ret == -1) {
             perror("epoll_ctl");
             return -1;
@@ -172,7 +171,17 @@ int main(int argc, char* argv[]) {
             if (errno != EAGAIN) {
               perror("read");
               done = 1;
+              break;
             }
+
+            event.events = EPOLLOUT | EPOLLET;
+            event.data.fd = events[i].data.fd;
+            ret = epoll_ctl(epoll_fd, EPOLL_CTL_MOD, events[i].data.fd, &event);
+            if (ret == -1) {
+              perror("epoll_ctl:mod");
+              done = 1;
+            }
+
             break;
           } else if (count == 0) {
             done = 1;
@@ -183,19 +192,13 @@ int main(int argc, char* argv[]) {
           ret = write(1, buf, count);
           if (ret == -1) {
             perror("write");
-            return -1;
+            done = 1;
+            break;
           }
         }
 
         if (done == 1) {
-          event.events = EPOLLOUT | EPOLLET;
-          ret = epoll_ctl(epoll_fd, EPOLL_CTL_MOD, events[i].data.fd, &event);
-          if (ret == -1) {
-            perror("epoll_ctl:mod");
-            return -1;
-          }
-          //printf("server got data on fd: %d\n", events[i].data.fd);
-          //close(events[i].data.fd);
+          close(events[i].data.fd);
         }
       } else if (events[i].events & EPOLLOUT) {
         // response
@@ -207,6 +210,7 @@ int main(int argc, char* argv[]) {
         fd = open("./epoll-server.c", O_RDONLY | O_NONBLOCK);
         if (fd == -1) {
           perror("open");
+          close(events[i].data.fd);
           return -1;
         }
 
@@ -214,6 +218,7 @@ int main(int argc, char* argv[]) {
         count = write(events[i].data.fd, head, sizeof head);
         if (count == -1 && errno != EAGAIN) {
           perror("write");
+          close(events[i].data.fd);
           return -1;
         }
 
@@ -222,10 +227,11 @@ int main(int argc, char* argv[]) {
           if (count == -1) {
             if (errno != EAGAIN) {
               perror("sendfile");
-              return -1;
+              done = 1;
             }
             break;
           } else if (count == 0) {
+            done = 1;
             break;
           }
         }
