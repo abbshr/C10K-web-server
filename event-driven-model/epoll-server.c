@@ -18,7 +18,7 @@
 #define MAX_EVENTS 10240
 #define PORT "8888"
 
-static int create_and_bind(char *port) {
+int create_and_bind(char *port) {
   struct addrinfo hints;
   struct addrinfo *result, *rp;
   int ret, fd;
@@ -56,7 +56,7 @@ static int create_and_bind(char *port) {
   return fd;
 }
 
-static int set_non_block(int fd) {
+int set_non_block(int fd) {
   int flags, ret;
 
   flags = fcntl(fd, F_GETFL, 0);
@@ -118,7 +118,7 @@ int main(int argc, char* argv[]) {
 
     n = syscall(__NR_epoll_wait, events, MAX_EVENTS, -1);//epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
     for (i = 0; i < n; i++) {
-      if (events[i].events & EPOLLERR || events[i].events &EPOLLHUP || !events[i].events & EPOLLIN) {
+      if (events[i].events & EPOLLERR || events[i].events & EPOLLHUP || !events[i].events & EPOLLIN) {
         fprintf(stderr, "epoll error\n");
         close(events[i].data.fd);
         continue;
@@ -159,7 +159,8 @@ int main(int argc, char* argv[]) {
           }
         }
         continue;
-      } else {
+      } else if (events[i].events & EPOLLIN) {
+        // get request
         int done = 0;
 
         for (;;) {
@@ -178,6 +179,7 @@ int main(int argc, char* argv[]) {
             break;
           }
 
+          // 写入标准输出
           ret = write(1, buf, count);
           if (ret == -1) {
             perror("write");
@@ -186,10 +188,56 @@ int main(int argc, char* argv[]) {
         }
 
         if (done == 1) {
-          printf("process finished on fd: %d\n", events[i].data.fd);
+          event.events = EPOLLOUT | EPOLLET;
+          ret = epoll_ctl(epoll_fd, EPOLL_CTL_MOD, events[i].data.fd, &event);
+          if (ret == -1) {
+            perror("epoll_ctl:mod");
+            return -1;
+          }
+          //printf("server got data on fd: %d\n", events[i].data.fd);
+          //close(events[i].data.fd);
+        }
+      } else if (events[i].events & EPOLLOUT) {
+        // response
+        int fd;
+        int done = 0;
+        size_t size = 512;
+        ssize_t count;
+
+        fd = open("./epoll-server.c", O_RDONLY | O_NONBLOCK);
+        if (fd == -1) {
+          perror("open");
+          return -1;
+        }
+
+        char *head = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n";
+        count = write(events[i].data.fd, head, sizeof head);
+        if (count == -1 && errno != EAGAIN) {
+          perror("write");
+          return -1;
+        }
+
+        for (;;) {
+          count = sendfile(events[i].data.fd, fd, 0, size);
+          if (count == -1) {
+            if (errno != EAGAIN) {
+              perror("sendfile");
+              return -1;
+            }
+            break;
+          } else if (count == 0) {
+            break;
+          }
+        }
+
+        if (done == 1) {
           close(events[i].data.fd);
         }
+
       }
     }
   }
+
+  free(events);
+  return 0;
 }
